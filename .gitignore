@@ -52,5 +52,14 @@
 *.history
 Debug/
 logs/
+.settings/
+MBPool/
+Related/
+STM32CubeIDE/
+.mxproject
+.project
+Converter.ioc
+mx.scratch
+
 
 
