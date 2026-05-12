@@ -14,7 +14,7 @@
 enum timings {
 	TIME_TO_CONTACT,	// тайминг для связи с преобразователем
 	TIME_COMMUNICATION,	// тайминг для формирования периодического сигнала "связь в порядке"
-	TIMING3,
+	TIME_TO_BUTTONS,
 	TIMING4,
 	TIMING5,
 };

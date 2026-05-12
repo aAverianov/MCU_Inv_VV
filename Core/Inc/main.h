@@ -65,15 +65,26 @@ void Error_Handler(void);
 #define SCS_GPIO_Port GPIOC
 #define RST_Pin GPIO_PIN_7
 #define RST_GPIO_Port GPIOC
+#define SIG_RUN_PIN	GPIO_PIN_2
+#define SIG_RUN_PORT GPIOC
+#define SIG_STOP_PIN GPIO_PIN_8
+#define SIG_STOP_PORT GPIOB
+#define SIG_FLT_PIN GPIO_PIN_9
+#define SIG_FLT_PORT GPIOB
+#define SIG_PSFLT_PIN GPIO_PIN_7
+#define SIG_PSFLT_PORT GPIOB
+#define SIG_DSTON_PIN GPIO_PIN_6
+#define SIG_DSTON_PORT GPIOB
 
 /* USER CODE BEGIN Private defines */
-//Битовые операции
+//Р‘РёС‚РѕРІС‹Рµ РѕРїРµСЂР°С†РёРё
 #define BIT_IN_FALSE(reg, bit)      reg &= ~(1UL << bit)
 #define BIT_IN_TRUE(reg, bit)       reg |= 1UL << bit
 #define BIT_TEST(reg, bit)			reg & 1UL << bit
 #define BIT_INVERT(reg, bit)		reg ^= 1UL << bit
-// для сброса адреса
+// РґР»СЏ СЃР±СЂРѕСЃР° Р°РґСЂРµСЃР°
 #define RESET_IP_READ			HAL_GPIO_ReadPin(RESET_IP_GPIO_Port, RESET_IP_Pin)
+	
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
