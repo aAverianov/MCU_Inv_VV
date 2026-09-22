@@ -34,6 +34,7 @@
 #include "UARTDMA.h"
 #include "Flash.h"
 #include "buttons.h"
+#include "adc_filter.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +44,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define SW_VERSION	100
 #define BOARD1
 //#define BOARD2
 //#define BOARD3
@@ -71,6 +73,9 @@ DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart3_rx;
 DMA_HandleTypeDef hdma_usart3_tx;
+DMA_HandleTypeDef hdma_adc1;
+ADC_HandleTypeDef hadc1;
+
 
 /* USER CODE BEGIN PV */
 // [ETHERNET (W5500)]--
@@ -103,8 +108,8 @@ union {
 } address;
 bool isIpChanged = 0; // флаг: IP-адрес был изменен пользователем (через регистры Модбас)
 uint32_t addressIpBak = 0; // для выявления изменений
-uint32_t tmp = 0;
-bool tmp1 = 1;
+
+uint16_t tmp = 0;
 // --------------------
 // [MODBUS] -----------
 /*
@@ -114,10 +119,10 @@ Coils             (01 Read (0x)) — однобитовый тип, доступ
 Discrete Inputs   (02 Read (1x)) — однобитовый тип, доступен только для чтения.
 Holding Registers (03 Read (4x)) — 16-битовый знаковый или беззнаковый тип, доступен для чтения и записи.
 Input Registers   (04 Read (3x)) — 16-битовый знаковый или беззнаковый тип, доступен только для чтения.
-                  (05 Write Single Coil)
-                  (06 Write Single Register)
-                  (15 Write Multiple Coils)
-                  (16 Write Multiple Registers)
+				  (05 Write Single Coil)
+				  (06 Write Single Register)
+				  (15 Write Multiple Coils)
+				  (16 Write Multiple Registers)
 */
 //---------------------------------
 #define REG_INPUT_START       1        // нумерация регистров в массиве с "1"
@@ -137,9 +142,9 @@ uint8_t ucRegCoilsBuf[REG_COILS_SIZE / 8] = { 0 };
 uint8_t ucRegDiscreteBuf[REG_DISCRETE_SIZE / 8] = { 0 };
 // порядок в регистрах Input Registers
 enum regInputBuf {
-	VOLTAGE,
-	CURRENT,
-	POWER,
+	V_ARC,
+	I_D,
+	SW_VER,
 	STATUS,
 	ADDR_EXIT_CODE_FLASH	// код завершения для операций с флэшем
 };
@@ -153,35 +158,74 @@ enum regHoldingBuf {
 };
 // Биты состояния преобразователя
 enum status {
-	DEVICE_ON,
-	// (bit 0) сигнал "Сеть"
-	WORK,
-	// (bit 1) сигнал "Работа"
-	ALARM,
-	// (bit 2) сигнал "Авария"
-	REMOTE,
-	// (bit 3) режим "Местн./Дистанц."
-	COMMUNICATION,
-	// (bit 4) сигнал "Проверка связи"
-	STATUS_ALARM_1,
-	// (bit 5) код аварийной ситуации
-	STATUS_ALARM_2,
+	PSFLT,
+	// (bit 0) 
+	ERR_CODE_0,
+	// (bit 1) 
+	ERR_CODE_1,
+	// (bit 2) 
+	ERR_CODE_2,
+	// (bit 3) 
+	ERR,
+	// (bit 4)
+	LC_MODE,
+	// (bit 5) 
+	ARC,
 	// (bit 6) 
-	STATUS_ALARM_3	// (bit 7) 
+	WORK,
+	// (bit 7) 
+	COMMUNICATION		// (bit 8)
 };
+
+typedef enum err_code 
+{
+	NO_ERROR,
+	CONT_FLT,
+	OC_FLT,
+	TEMPR_FLT,
+	COMM_FLT,
+	
+} err_code_t;
+#define REG_STATUS_ERR_CODE_POS   (1U)									//Позиция начала поля (бит 1)
+#define REG_STATUS_ERR_CODE_MASK  (0x07U << REG_STATUS_ERR_CODE_POS)	// Маска для поля (0b111 << 1 = 0b1110
+
+err_code_t err_code = NO_ERROR;
+
+typedef enum command
+{
+	STOP,
+	RUN,
+	RST_ERR, 
+	
+} command_t;
+
+command_t R_comm = STOP;
+uint8_t ch_rst = 0; //TODO NEED REFACTOR иногда не сраб от 1 раза, ввел счетчик
+
+uint8_t flag_precharge_ok = 0;
+uint8_t flag_init_wait = 0;
+uint8_t flag_init_cmpl = 0;
+
+uint8_t prev_control = 0;
+uint16_t u_in = 0;
 
 // Для синхронизации (непрерывно работающие таймеры)
 
-const uint16_t timeToContact = 1000; // 1 s для формирования команды преобразователю
+const uint16_t timeToContact = 100; // 100 ms для формирования команды преобразователю
 const uint16_t timeCommunication = 1000; // 1 s для формирования сигнала "связь ок" в Модбас
 const uint16_t timeToButtons = 1; // 1 ms для кнопок
-const uint16_t timing4 = 100; // 100 ms
+const uint16_t timeToADC = 10; // 10 ms
 const uint16_t timing5 = 1000; // 1000 ms
 // Для одноразовых таймеров (требуется запуск каждый раз)
 const uint16_t timer1s = 1000; // 1000 ms
 const uint16_t timer2s = 2000; // 2000 ms
 const uint16_t timer3s = 3000; // 3000 ms
 const uint16_t timer4s = 4000; // 
+
+uint16_t iref_raw = 0;
+uint16_t iref_f = 0;
+FILTER_REG F_iref;
+uint16_t buf_iref[COUNT_FILTER];
 
 /* USER CODE END PV */
 
@@ -193,6 +237,7 @@ static void MX_TIM1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_ADC1_Init(void);
 
 /* USER CODE BEGIN PFP */
 
@@ -305,6 +350,8 @@ int main(void)
 	MX_USART3_UART_Init();
 	MX_SPI2_Init();
 	MX_USART1_UART_Init();
+	MX_ADC1_Init();
+	HAL_Delay(2000);
 	/* USER CODE BEGIN 2 */
 	HAL_TIM_Base_Start_IT(&htim1); // канал для всяких нужд - запустить таймер, прерывания будут вызываться каждые 1 мс
 	// подготовка IP-адреса
@@ -361,62 +408,275 @@ int main(void)
 	// Set the interval for sending heartbeat packets automatically,
 	// the unit time is 5s, so set it to 10s here 0 is not enabled.
 	setSn_KPALVTR(MODBUS_SOCKET, 2);
-	led.SetTiming(timeToContact, timeCommunication, timeToButtons, timing4, timing5); // установки таймингов 0,1,2,3,4 (значения см.выше)
-	led.SetTimers(timer1s, timer2s, timer3s, timer4s); // установки для одноразовых таймеров
+	led.SetTiming(timeToContact, timeCommunication, timeToButtons, timeToADC, timing5); // установки таймингов 0,1,2,3,4 (значения см.выше)
+	led.SetTimers(timer1s, timer2s, timer3s, timer4s); // установки для одноразовых таймеров 0,1,2,3
+	
+	//Init Loc/Dist_BTN state
+	if (HAL_GPIO_ReadPin(BTN_DST_LOC_PORT, BTN_DST_LOC_PIN))
+	{
+		HAL_GPIO_WritePin(IND_LCON_PORT, IND_LCON_PIN, GPIO_PIN_SET);
+		BIT_IN_TRUE(usRegInputBuf[STATUS], LC_MODE);
+	}
+	else
+	{
+		HAL_GPIO_WritePin(IND_LCON_PORT, IND_LCON_PIN, GPIO_PIN_RESET);	
+		BIT_IN_FALSE(usRegInputBuf[STATUS], LC_MODE);
+	}
 
-  /* USER CODE END 2 */
+	/* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+	/* Infinite loop */
+	/* USER CODE BEGIN WHILE */
 	while (1)
 	{
+		if (flag_init_wait)
+		{
+			if (led.GetTimer(TIMER2) == 0)
+			{
+				flag_init_wait = 0;
+				flag_init_cmpl = 1;
+			}
+
+		}
 		if (led.Timing(TIME_TO_BUTTONS))
 		{
 			buttons_Process();
 			
-			if (button_IsPressed(BTN_START_LOC)) 
-			{
-				usRegHoldingBuf[CONTROL] = 1;
-			}
-			if (button_IsPressed(BTN_STOP_LOC))
-			{
-				usRegHoldingBuf[CONTROL] = 0;
-			}
-			
 			if (button_IsPressed(BTN_DST_LOC)) 
 			{
-				HAL_GPIO_WritePin(SIG_DSTON_PORT, SIG_DSTON_PIN, GPIO_PIN_SET);
+				HAL_GPIO_WritePin(IND_LCON_PORT, IND_LCON_PIN, GPIO_PIN_RESET);
+				BIT_IN_FALSE(usRegInputBuf[STATUS], LC_MODE);
 			}
 			if (button_IsReleased(BTN_DST_LOC))
 			{
-				HAL_GPIO_WritePin(SIG_DSTON_PORT, SIG_DSTON_PIN, GPIO_PIN_RESET);
+				HAL_GPIO_WritePin(IND_LCON_PORT, IND_LCON_PIN, GPIO_PIN_SET);
+				BIT_IN_TRUE(usRegInputBuf[STATUS], LC_MODE);
 			}
 			
+			if (button_IsPressed(BTN_START_LOC)) 
+			{
+				if (BIT_TEST(usRegInputBuf[STATUS], LC_MODE))
+				{
+					R_comm = RUN;
+				}
+			}
 			
+			if (button_IsReleased(BTN_START_DST))
+			{
+				if (!(BIT_TEST(usRegInputBuf[STATUS], LC_MODE)))
+				{
+					R_comm = RUN;
+				}
+				
+			}
+			
+			if (button_IsPressed(BTN_STOP_LOC) || !(button_IsHold(BTN_STOP_DST)) || button_IsReleased(BTN_STOP_DST) )
+			{
+				R_comm = STOP;
+			}
+			
+			if (button_IsPressed(BTN_RST_LOC))
+			{
+				if ((BIT_TEST(usRegInputBuf[STATUS], ERR)) && (BIT_TEST(usRegInputBuf[STATUS], LC_MODE)))
+				{
+					if ((err_code == OC_FLT) || (err_code == TEMPR_FLT))		//TODO REFACTOR если ошибки Inv_VV то пробуем сбросить
+					{
+						R_comm = RST_ERR;
+						ch_rst = 3;
+					}
+					else if(err_code == CONT_FLT)								//TODO REFACTOR
+					{
+						if (HAL_GPIO_ReadPin(CNTRL_CONTACTOR_PORT, CNTRL_CONTACTOR_PIN))
+						{
+							BIT_IN_FALSE(usRegInputBuf[STATUS], ERR);
+							err_code = NO_ERROR;
+						}
+						
+					}
+				}
+				
+			}
+			if (button_IsReleased(BTN_RST_DST))
+			{
+				if ((BIT_TEST(usRegInputBuf[STATUS], ERR)) && !(BIT_TEST(usRegInputBuf[STATUS], LC_MODE)))
+				{
+					if ((err_code == OC_FLT) || (err_code == TEMPR_FLT))		//TODO REFACTOR если ошибки Inv_VV то пробуем сбросить
+					{
+						R_comm = RST_ERR;
+						ch_rst = 3;
+					}
+					else if(err_code == CONT_FLT)								//TODO REFACTOR
+					{
+						if (HAL_GPIO_ReadPin(CNTRL_CONTACTOR_PORT, CNTRL_CONTACTOR_PIN))
+						{
+							BIT_IN_FALSE(usRegInputBuf[STATUS], ERR);
+							err_code = NO_ERROR;
+						}
+						
+					}
+				}
+				
+			}
+			
+			//TODO обработку команд по цифре переделать NEED REFACTOR
+			if (!(prev_control == (uint8_t)usRegHoldingBuf[CONTROL]))
+			{
+				if (usRegHoldingBuf[CONTROL] == 2)
+				{
+					R_comm = STOP;
+				}
+				
+				if (!(BIT_TEST(usRegInputBuf[STATUS], LC_MODE)))
+				{
+					if (usRegHoldingBuf[CONTROL] == 1)
+					{
+						R_comm = RUN;
+					}
+					
+					if (usRegHoldingBuf[CONTROL] == 3)
+					{
+						R_comm = RST_ERR;
+						ch_rst = 3;
+					}
+						
+				}
+				prev_control = usRegHoldingBuf[CONTROL];
+			}
+			
+			//Проверка контактора и РКФ TODO сделать отдельную функцию
+			
+			
+			if (flag_init_cmpl)
+			{							
+				if (!(HAL_GPIO_ReadPin(CNTRL_CONTACTOR_PORT, CNTRL_CONTACTOR_PIN)))
+				{
+					BIT_IN_TRUE(usRegInputBuf[STATUS], ERR);
+					err_code = CONT_FLT;
+					if (R_comm == RUN)				//TODO REFACTOR
+					{
+						R_comm = STOP;
+						optics.Command(R_comm, 0);
+					}
+				}		
+			
+				if (!(HAL_GPIO_ReadPin(CNTRL_PS_PORT, CNTRL_PS_PIN)))
+				{
+				
+					BIT_IN_TRUE(usRegInputBuf[STATUS], PSFLT);
+				
+				}
+				else
+				{
+					BIT_IN_FALSE(usRegInputBuf[STATUS], PSFLT);
+				}
+			}
+						
 		}
+		if (led.Timing(TIME_TO_ADC))
+		{
+			HAL_ADC_Start_DMA(&hadc1,
+				(uint32_t *)&iref_raw,
+				1U);
+		}
+		
 		// время связи с преобразователем
 		if (led.Timing(TIME_TO_CONTACT))		
 		{
-			optics.Command(usRegHoldingBuf[CONTROL]); // послать команду
+			iref_f = get_filter_value(&F_iref);
+			if (((err_code) && (R_comm == RUN)) || (!flag_init_cmpl)) R_comm = STOP; //TODO NEED REFACTOR
+			optics.Command(R_comm, uint8_t(iref_f >> 4)); // послать команду
+			if (ch_rst)
+			{
+				ch_rst--;				
+			}
+			else if (R_comm == RST_ERR) R_comm = STOP;
+			else ch_rst--; //отправка сброса только 3 раза за нажатие TODO разобраться почему не хватает 1
 		}
 		// если есть новые данные от преобразователя
 		if (optics.Poll())						
 		{
-			usRegInputBuf[VOLTAGE] = optics.Voltage();
-			usRegInputBuf[CURRENT] = optics.Current();
-			usRegInputBuf[POWER] = optics.Power();
-			usRegInputBuf[STATUS] &= 0xFFF0; // очистить (данные статуса занимают младшую тетраду)
-			usRegInputBuf[STATUS] |= optics.Status(); // записать статус
-		}
+			usRegInputBuf[V_ARC] = optics.Voltage();
+			usRegInputBuf[I_D] = optics.Current();
+			//usRegInputBuf[V_IN] = optics.Power();
+			usRegInputBuf[SW_VER] = SW_VERSION;
+			u_in = optics.Power();
+			usRegInputBuf[STATUS] &= 0xFF21; // очистить данные (1111 1111 0010 0001)
+			//usRegInputBuf[STATUS] |= optics.Status(); // записать статус
+			tmp = optics.Status();
+			
+			if (BIT_TEST(tmp, 3)) err_code = OC_FLT; //TODO NEED REFACTOR
+			if (BIT_TEST(tmp, 2)) err_code = TEMPR_FLT;
+			
+			//update error_code
+			tmp &= ~REG_STATUS_ERR_CODE_MASK;
+			tmp |= ((err_code << REG_STATUS_ERR_CODE_POS) & REG_STATUS_ERR_CODE_MASK);
+			if (err_code == CONT_FLT) BIT_IN_TRUE(tmp, ERR);
+			usRegInputBuf[STATUS] |= tmp;
+			
+			//Analyze optics data						
+			if ((u_in > 1850) && (!flag_precharge_ok))
+			{
+				HAL_GPIO_WritePin(CMD_CONTACTOR_PORT, CMD_CONTACTOR_PIN, GPIO_PIN_SET);
+				flag_precharge_ok = 1;
+				led.StartTimer(TIMER2); //задержка для сборки схемы 3000ms
+				flag_init_wait = 1;
+			}
+					
+			if (BIT_TEST(usRegInputBuf[STATUS], WORK)) 
+			{
+				HAL_GPIO_WritePin(IND_STOP_PORT, IND_STOP_PIN, GPIO_PIN_RESET);  
+				HAL_GPIO_WritePin(SIG_RUN_PORT, SIG_RUN_PIN, GPIO_PIN_SET);
+				
+				if (BIT_TEST(usRegInputBuf[STATUS], ARC)) 
+				{
+					HAL_GPIO_WritePin(IND_ARC_PORT, IND_ARC_PIN, GPIO_PIN_SET);
+					HAL_GPIO_WritePin(IND_ARC_FLT_PORT, IND_ARC_FLT_PIN, GPIO_PIN_RESET);
+			
+				}
+				else 
+				{
+					HAL_GPIO_WritePin(IND_ARC_PORT, IND_ARC_PIN, GPIO_PIN_RESET);
+					HAL_GPIO_WritePin(IND_ARC_FLT_PORT, IND_ARC_FLT_PIN, GPIO_PIN_SET);
+				}
+			}
+			else 
+			{
+				HAL_GPIO_WritePin(IND_STOP_PORT, IND_STOP_PIN, GPIO_PIN_SET);
+				HAL_GPIO_WritePin(IND_ARC_PORT, IND_ARC_PIN, GPIO_PIN_RESET);
+				HAL_GPIO_WritePin(IND_ARC_FLT_PORT, IND_ARC_FLT_PIN, GPIO_PIN_RESET);
+				HAL_GPIO_WritePin(SIG_RUN_PORT, SIG_RUN_PIN, GPIO_PIN_RESET);
+			}	
+			if (BIT_TEST(usRegInputBuf[STATUS], ERR))
+			{
+				HAL_GPIO_WritePin(IND_FLT_PORT, IND_FLT_PIN, GPIO_PIN_SET);
+			}
+			else
+			{
+				HAL_GPIO_WritePin(IND_FLT_PORT, IND_FLT_PIN, GPIO_PIN_RESET);
+				err_code = NO_ERROR;
+			}
+			if (BIT_TEST(usRegInputBuf[STATUS], PSFLT))
+			{
+				HAL_GPIO_WritePin(IND_PSFLT_PORT, IND_PSFLT_PIN, GPIO_PIN_SET);
+			}
+			else
+			{
+				HAL_GPIO_WritePin(IND_PSFLT_PORT, IND_PSFLT_PIN, GPIO_PIN_RESET);
+			}
+			
+		}		
+		
 		// если данные недостоверны (с момента приема последней посылки прошло больше времени чем положено)
 		if (!optics.GetStatusData())			
 		{
 			// обнулить все переметры
-			usRegInputBuf[VOLTAGE] = 0;
-			usRegInputBuf[CURRENT] = 0;
-			usRegInputBuf[POWER] = 0;
-			usRegInputBuf[STATUS] &= 0x0010; // оставить только сигнал связи
-		}
+			usRegInputBuf[V_ARC] = 0;
+			usRegInputBuf[I_D] = 0;
+			u_in = 0;
+			usRegInputBuf[STATUS] &= 0xFF3F; // очистка данных от преобразователя (1111 1111 0011 1111)
+		}		
+		
+		
 		// если есть изменение адреса
 		if (isIpChanged) {						
 			address.ip[0] = usRegHoldingBuf[IP_OKTET1];
@@ -467,6 +727,7 @@ void SystemClock_Config(void)
 {
 	RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
 	RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
+	RCC_PeriphCLKInitTypeDef PeriphClkInit = { 0 };
 
 	/** Initializes the RCC Oscillators according to the specified parameters
 	* in the RCC_OscInitTypeDef structure.
@@ -482,17 +743,23 @@ void SystemClock_Config(void)
 	{
 		Error_Handler();
 	}
-
+	
 	/** Initializes the CPU, AHB and APB buses clocks
 	*/
 	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-	                            | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+								| RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
 	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
 	RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
 	RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
 	RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
 	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+	PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
+	if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
 	{
 		Error_Handler();
 	}
@@ -658,6 +925,9 @@ static void MX_DMA_Init(void)
 	__HAL_RCC_DMA1_CLK_ENABLE();
 
 	/* DMA interrupt init */
+	/* DMA1_Channel1_IRQn interrupt configuration */
+	HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+	HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 	/* DMA1_Channel2_IRQn interrupt configuration */
 	HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
 	HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
@@ -697,20 +967,20 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(RESET_IP_GPIO_Port, &GPIO_InitStruct);
 
 	
-	GPIO_InitStruct.Pin = LED_Pin | SIG_DSTON_PIN | SIG_PSFLT_PIN | SIG_STOP_PIN | SIG_FLT_PIN;
+	GPIO_InitStruct.Pin = LED_Pin | IND_LCON_PIN | IND_PSFLT_PIN | IND_STOP_PIN | IND_FLT_PIN;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 	
-	GPIO_InitStruct.Pin = SCS_Pin | RST_Pin | SIG_RUN_PIN;
+	GPIO_InitStruct.Pin = SCS_Pin | RST_Pin | SIG_RUN_PIN | CMD_CONTACTOR_PIN | IND_ARC_PIN | IND_ARC_FLT_PIN;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 	
-	GPIO_InitStruct.Pin = BTN_START_DST_PIN;
+	GPIO_InitStruct.Pin = BTN_START_DST_PIN | CNTRL_CONTACTOR_PIN | CNTRL_PS_PIN;
 	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
@@ -729,9 +999,9 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 	
 	
-	HAL_GPIO_WritePin(GPIOB, LED_Pin | SIG_DSTON_PIN | SIG_PSFLT_PIN | SIG_STOP_PIN | SIG_FLT_PIN, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOB, LED_Pin | IND_LCON_PIN | IND_PSFLT_PIN | IND_STOP_PIN | IND_FLT_PIN, GPIO_PIN_RESET);
 
-	HAL_GPIO_WritePin(GPIOC, SCS_Pin | RST_Pin | SIG_RUN_PIN, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOC, SCS_Pin | RST_Pin | SIG_RUN_PIN | CMD_CONTACTOR_PIN, GPIO_PIN_RESET);
 	
 
 	/* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -739,6 +1009,47 @@ static void MX_GPIO_Init(void)
 	/* USER CODE END MX_GPIO_Init_2 */
 }
 
+static void MX_ADC1_Init(void)
+{
+
+	/* USER CODE BEGIN ADC1_Init 0 */
+
+	/* USER CODE END ADC1_Init 0 */
+
+	ADC_ChannelConfTypeDef sConfig = { 0 };
+
+	/* USER CODE BEGIN ADC1_Init 1 */
+
+	/* USER CODE END ADC1_Init 1 */
+
+	/** Common config
+	*/
+	hadc1.Instance = ADC1;
+	hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+	hadc1.Init.ContinuousConvMode = DISABLE;
+	hadc1.Init.DiscontinuousConvMode = DISABLE;
+	hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+	hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+	hadc1.Init.NbrOfConversion = 1;
+	if (HAL_ADC_Init(&hadc1) != HAL_OK)
+	{
+		Error_Handler();
+	}
+
+	/** Configure Regular Channel
+	*/
+	sConfig.Channel = ADC_CHANNEL_4;
+	sConfig.Rank = ADC_REGULAR_RANK_1;
+	sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+	if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	/* USER CODE BEGIN ADC1_Init 2 */
+	HAL_ADCEx_Calibration_Start(&hadc1);
+	/* USER CODE END ADC1_Init 2 */
+
+}
 /* USER CODE BEGIN 4 */
 
 eMBErrorCode
@@ -752,7 +1063,7 @@ eMBRegHoldingCB(UCHAR *pucRegBuffer,
 	usAddress--; // it already plus one in modbus function method.
 	// Проверка на допустимость адреса и количества регистров
 	if ((usAddress >= REG_HOLDING_START) &&
-	    (usAddress + usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS))
+		(usAddress + usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS))
 	{
 		iRegIndex = (int)(usAddress - REG_HOLDING_START);
 		switch (eMode)
@@ -762,9 +1073,9 @@ eMBRegHoldingCB(UCHAR *pucRegBuffer,
 			while (usNRegs > 0)
 			{
 				*pucRegBuffer++ =
-				    (unsigned char)(usRegHoldingBuf[iRegIndex] >> 8);
+					(unsigned char)(usRegHoldingBuf[iRegIndex] >> 8);
 				*pucRegBuffer++ =
-				    (unsigned char)(usRegHoldingBuf[iRegIndex] & 0xFF);
+					(unsigned char)(usRegHoldingBuf[iRegIndex] & 0xFF);
 				iRegIndex++;
 				usNRegs--;
 			}
@@ -779,11 +1090,7 @@ eMBRegHoldingCB(UCHAR *pucRegBuffer,
 				if (iRegIndex == CONTROL)					// если действие с регистром управления
 				{
 					// "отфильтровать"
-					usRegHoldingBuf[iRegIndex] &= 0x0003; // рабочие - 2 мл.бита
-					if (usRegHoldingBuf[iRegIndex] == 3)	// если активны оба бита (недопустимо)
-					{
-						usRegHoldingBuf[iRegIndex] = 1; // активен будет бит выключения
-					}
+					usRegHoldingBuf[iRegIndex] &= 0x0003; // рабочие - 2 мл.бита					
 				}
 				iRegIndex++;
 				usNRegs--;
@@ -810,9 +1117,9 @@ eMBRegInputCB(UCHAR *pucRegBuffer, USHORT usAddress, USHORT usNRegs)
 		while (usNRegs > 0)
 		{
 			*pucRegBuffer++ =
-			    (unsigned char)(usRegInputBuf[iRegIndex] >> 8);
+				(unsigned char)(usRegInputBuf[iRegIndex] >> 8);
 			*pucRegBuffer++ =
-			    (unsigned char)(usRegInputBuf[iRegIndex] & 0xFF);
+				(unsigned char)(usRegInputBuf[iRegIndex] & 0xFF);
 			iRegIndex++;
 			usNRegs--;
 		}
@@ -839,7 +1146,7 @@ eMBRegCoilsCB(UCHAR *pucRegBuffer,
 	usAddress--; // it already plus one in modbus function method.
 	/* Check if we have registers mapped at this block. */
 	if ((usAddress >= REG_COILS_START) &&
-	    (usAddress + usNCoils <= REG_COILS_START + REG_COILS_SIZE))
+		(usAddress + usNCoils <= REG_COILS_START + REG_COILS_SIZE))
 	{
 		usBitOffset = (unsigned short)(usAddress - REG_COILS_START);
 		switch (eMode)
@@ -849,7 +1156,7 @@ eMBRegCoilsCB(UCHAR *pucRegBuffer,
 			while (iNCoils > 0)
 			{
 				*pucRegBuffer++ =
-				    xMBUtilGetBits(ucRegCoilsBuf,
+					xMBUtilGetBits(ucRegCoilsBuf,
 					usBitOffset,
 					(unsigned char)(iNCoils > 8 ? 8 : iNCoils));
 				iNCoils -= 8;
@@ -889,16 +1196,16 @@ eMBRegDiscreteCB(UCHAR *pucRegBuffer, USHORT usAddress, USHORT usNDiscrete)
 	usAddress--; // it already plus one in modbus function method.
 	/* Check if we have registers mapped at this block. */
 	if ((usAddress >= REG_DISCRETE_START) &&
-	    (usAddress + usNDiscrete <= REG_DISCRETE_START + REG_DISCRETE_SIZE))
+		(usAddress + usNDiscrete <= REG_DISCRETE_START + REG_DISCRETE_SIZE))
 	{
 		usBitOffset = (unsigned short)(usAddress - REG_DISCRETE_START);
 		while (iNDiscrete > 0)
 		{
 			*pucRegBuffer++ =
-			    xMBUtilGetBits( ucRegDiscreteBuf,
+				xMBUtilGetBits( ucRegDiscreteBuf,
 				usBitOffset,
 				(unsigned char)(iNDiscrete >
-				                   8 ? 8 : iNDiscrete));
+								   8 ? 8 : iNDiscrete));
 			iNDiscrete -= 8;
 			usBitOffset += 8;
 		}

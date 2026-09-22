@@ -18,7 +18,7 @@ enum buttons {
 	BTN_DST_LOC,
 	BTN_START_DST,
 	BTN_STOP_DST,
-	BTN_RST_DST,	
+	BTN_RST_DST,
 }; 
 
 #define BTN_START_LOC_PORT       GPIOA
@@ -29,12 +29,14 @@ enum buttons {
 #define BTN_RST_LOC_PIN          GPIO_PIN_5
 #define BTN_DST_LOC_PORT         GPIOB
 #define BTN_DST_LOC_PIN			 GPIO_PIN_11
+//Dst buttons invert signal
 #define BTN_START_DST_PORT       GPIOC
 #define BTN_START_DST_PIN        GPIO_PIN_5
 #define BTN_STOP_DST_PORT        GPIOB
 #define BTN_STOP_DST_PIN         GPIO_PIN_0
 #define BTN_RST_DST_PORT         GPIOB
 #define BTN_RST_DST_PIN          GPIO_PIN_1
+	
 
 typedef struct {
 	GPIO_TypeDef *port; 
@@ -52,6 +54,8 @@ void buttons_Process(void);
 bool button_IsPressed(uint8_t idx);
 
 bool button_IsReleased(uint8_t idx);
+	
+bool button_IsHold(uint8_t idx);
 
 #ifdef __cplusplus
 }

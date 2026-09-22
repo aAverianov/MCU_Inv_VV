@@ -40,7 +40,7 @@ extern Led led;
 const uint16_t ringBufferSize_ = 20;		// размер кольцевого буфера
 const uint8_t amountOfData_ = 8;			// размер массива (в байтах) в котором хранятся данные считанные из uart (включая crc)
 const uint16_t amountOfData16_ = 4;			//		-//-	  (в 16-бит.словах)
-const uint8_t amountOfCommand_ = 3;			// размер массива (в байтах) в котором хранится команда для uart (включая crc)
+const uint8_t amountOfCommand_ = 4;			// размер массива (в байтах) в котором хранится команда для uart (включая crc)
 
 
 class UARTDMA {
@@ -51,7 +51,7 @@ public:
 	void SetStatusTx();					// Установить статус передатчика: готов к передаче
 	bool GetStatusData();
 	uint16_t Poll();					// Опрос UART и чтение данных если они есть. Необходимо постоянно вызывать в цикле
-	void Command(uint8_t command);		// Посылка в UART команды для преобразователя
+	void Command(uint8_t command, uint8_t ref);		// Посылка в UART команды для преобразователя
 	uint16_t Voltage();					// Чтение напряжения из соотв.позиции массива структуры
 	uint16_t Current();					// Чтение тока из соотв.позиции массива структуры
 	uint16_t Power();					// Чтение мощности из соотв.позиции массива структуры
@@ -70,6 +70,7 @@ private:
 		struct {
 			uint8_t id;				// ид команды
 			uint8_t command;		// команда
+			uint8_t iref;			
 			uint8_t crc;
 		};
 	} write;

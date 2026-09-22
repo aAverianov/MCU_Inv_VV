@@ -56,3 +56,10 @@ bool button_IsReleased(uint8_t idx)
 	return ev;
 }
 
+bool button_IsHold(uint8_t idx)
+{
+	if (idx >= BTN_COUNT) return false;
+	bool ev = buttons[idx].stable;
+	return ev;
+}
+

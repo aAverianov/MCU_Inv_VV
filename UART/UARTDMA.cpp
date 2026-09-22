@@ -60,10 +60,11 @@ void UARTDMA::Request() {
 
 // Метод записи командной последовательности для исп.у-ва
 // Вх.: байт команды
-void UARTDMA::Command(uint8_t comm) {
+void UARTDMA::Command(uint8_t comm, uint8_t ref) {
 	write.id = ID_COMMAND;
 	write.command = comm;
-	write.crc = CalculateCRC8(write.allData, 2); 
+	write.iref = ref;
+	write.crc = CalculateCRC8(write.allData, 3); 
 	Request();
 }
 
